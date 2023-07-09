@@ -240,3 +240,26 @@ pub fn test(_: TokenStream, item: TokenStream) -> TokenStream {
     output.extend(item);
     output
 }
+
+
+/// Creates route handler without attached method guard.
+///
+/// Syntax: `#[handler("path"[, attributes])]`
+///
+/// ## Attributes:
+///
+/// - `"path"` - Raw literal string with path for which to register handler. Mandatory.
+/// - `async` - Attribute to indicate that registered function is asynchronous.
+/// - `guard="function_name"` - Registers function as guard using `actix_web::guard::fn_guard`
+///
+/// # Examples
+/// ```
+/// #[actix_web::handler]
+/// async fn example() -> HttpResponse {
+///     HttpResponse::Ok().finish()
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn handler(args: TokenStream, input: TokenStream) -> TokenStream {
+    route::with_method(Some(crate::route::MethodType::Get), args, input)
+}
