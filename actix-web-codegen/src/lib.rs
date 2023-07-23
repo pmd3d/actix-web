@@ -254,12 +254,192 @@ pub fn test(_: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// # Examples
 /// ```
-/// #[actix_web::handler]
-/// async fn example() -> HttpResponse {
-///     HttpResponse::Ok().finish()
+/// #[actix_web::handler("/")]
+/// async fn example() -> impl Responder {
+///    HttpResponse::Ok().finish()
 /// }
 /// ```
 #[proc_macro_attribute]
 pub fn handler(args: TokenStream, input: TokenStream) -> TokenStream {
     route::with_method(Some(crate::route::MethodType::Get), args, input)
+}
+
+
+//////////////////////////////////////////////////////////////////////////////
+/// experiment
+///
+
+
+/// Generates scope
+///
+/// Syntax: `#[scope("path"[, attributes])]`
+///
+/// Due to current limitation it cannot be applied to modules themself.
+/// Instead one should create const variable that contains module code.
+///
+/// ## Attributes:
+///
+/// - `"path"` - Raw literal string with path for which to register handler. Mandatory.
+/// - `hook="function_name"` - Registers function to be run on scope before registering everything else.
+/// - `guard="function_name"` - Registers function as guard using `actix_web::guard::fn_guard`
+/// - `hanlder="function_name"` - Registers route hanlder as part of scope.
+///
+/// ## Special members:
+///
+/// - `#[hook]` functions - are going to be run on scope before registering everything else
+/// - `#[guard]` functions - specifies function to be passed to `guard_fn`.
+/// - `init` - Scope initialization function. Used as `hook`
+/// - `default_resource` - function will be used as default method to the scope.
+///
+/// # Example
+///
+/// ```rust
+/// use actix_web_cute_codegen::{scope};
+///
+/// #[scope("/scope")]
+/// const mod_inner: () = {
+///     use actix_web_cute_codegen::{get, hook};
+///     use actix_web::{HttpResponse, Responder};
+///     use futures::{Future, future};
+///
+///     #[get("/test")]
+///     pub fn test() -> impl Responder {
+///         HttpResponse::Ok()
+///     }
+///
+///     #[get("/test_async")]
+///     pub fn auto_sync() -> impl Future<Item=HttpResponse, Error=actix_web::Error> {
+///         future::ok(HttpResponse::Ok().finish())
+///     }
+///
+///     ///Special function to initialize scope. Called as hook before routes registration.
+///     pub fn init<P: 'static>(scope: actix_web::Scope<P>) -> actix_web::Scope<P> {
+///         scope
+///     }
+///
+///     pub fn default_resource<P: 'static>(res: actix_web::Resource<P>) -> actix_web::Resource<P> {
+///         res.to(|| HttpResponse::InternalServerError())
+///     }
+///
+/// };
+/// ```
+///
+/// # Note
+///
+/// Internally the macro generate struct with name of scope (e.g. `mod_inner`)
+/// And create public module as `<name>_scope`
+/// todo: add both branches to match statement...
+#[proc_macro_attribute]
+pub fn scope(args: TokenStream, input: TokenStream) -> TokenStream {
+    let args = syn::parse_macro_input::parse::<syn::AttributeArgs>(args).expect("To parse route's arguments");
+    match args.len() {
+        _ => ImplScope::new(input).generate(),
+    }
+}
+
+use std::{mem, fmt};
+use std::collections::HashSet;
+
+#[derive(Default)]
+struct Items {
+    guards: Vec<String>,
+    hooks: Vec<String>,
+    handlers: Vec<String>,
+}
+struct ScopeItems {
+    handlers: Vec<String>,
+    guards: Vec<String>,
+    hooks: Vec<String>,
+    default: Option<String>,
+    raw_routes: Vec<syn::ItemFn>
+}
+
+impl ScopeItems {
+    pub fn from_items(items: &[syn::Item]) -> Self {
+        let mut handlers = Vec::new();
+        let mut guards = Vec::new();
+        let mut hooks = Vec::new();
+        let mut default = None;
+        let mut raw_routes = Vec::new();
+
+        for item in items {
+            match item {
+                syn::Item::Fn(ref fun) => {
+                    if fun.sig.ident == "default_resource" {
+                        if default.is_some() {
+                            panic!("Second 'default_resource' in scope! You cannot have more than one default resource");
+                        }
+
+                        default = Some(format!("{}", fun.sig.ident));
+                        continue;
+                    } else if fun.sig.ident == "init" {
+                        hooks.push(fun.sig.ident.to_string());
+                        continue;
+                    }
+
+                    for attr in fun.attrs.iter() {
+                        for bound in attr.path.segments.iter() {
+                            // todo: need head, connect, options, trace, patch
+                            if bound.ident == "get" || bound.ident == "put" || bound.ident == "handler" || bound.ident == "delete" || bound.ident == "post" {
+                                handlers.push(format!("{}", fun.sig.ident));
+                                raw_routes.push(fun.clone());
+                                break;
+                            } else if bound.ident == "guard" {
+                                guards.push(format!("{}", fun.sig.ident));
+                                break;
+                            } else if bound.ident == "hook" {
+                                hooks.push(format!("{}", fun.sig.ident));
+                                break;
+                            }
+                        }
+                    }
+                },
+                _ => continue,
+            }
+        }
+
+        Self {
+            handlers,
+            guards,
+            hooks,
+            default,
+            raw_routes,
+        }
+    }
+}
+
+struct ImplScope {
+    ast: syn::ItemImpl,
+    name: String,
+    scope_items: ScopeItems,
+}
+
+impl ImplScope {
+    pub fn new(input: TokenStream) -> Self {
+        let mut ast: syn::ItemImpl = syn::parse(input).expect("Parse input as impl block");
+
+        let name = match &*ast.self_ty {
+            &syn::Type::Path(ref type_path) => {
+                if type_path.path.segments.len() > 1 {
+                    panic!("Too many type params in path!");
+                }
+
+                let item = type_path.path.segments.first().expect("To have at least one path segment in Self type");
+                item.value().ident.to_string()
+            },
+            _ => panic!("Scope can be implemented only for impl Block")
+        };
+
+        let mut scope_items: Vec<syn::Item> = Vec::new();
+
+        let mut used_attrs = HashSet::new();
+
+        let scope_items = ScopeItems::from_items(&scope_items);
+
+        Self {
+            ast,
+            name,
+            scope_items,
+        }
+    }
 }
