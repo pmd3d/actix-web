@@ -4,12 +4,14 @@
 
 ### Added
 
+- Add `rustls-0_20` crate feature.
+- Add `{H1Service, H2Service, HttpService}::rustls_021()` and `HttpService::rustls_021_with_config()` service constructors.
 - Add `body::to_body_limit()` function.
 - Add `body::BodyLimitExceeded` error type.
 
 ### Changed
 
-- Minimum supported Rust version (MSRV) is now 1.65 due to transitive `time` dependency.
+- Minimum supported Rust version (MSRV) is now 1.68 due to transitive `time` dependency.
 
 ## 3.3.1 - 2023-03-02
 
