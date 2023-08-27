@@ -554,3 +554,237 @@ fn input_and_compile_error(mut item: TokenStream, err: syn::Error) -> TokenStrea
     item.extend(compile_err);
     item
 }
+
+pub(crate) fn handle_scope(args: TokenStream, input: TokenStream) -> TokenStream  {
+    if args.is_empty() {
+        panic!("invalid server definition, expected: #[scope(\"some path\")]");
+    }
+
+    let ast: syn::ItemConst = syn::parse(input.clone()).expect("Parse input as a const variable");
+    //TODO: we should change it to mod once supported on stable
+    //let ast: syn::ItemMod = syn::parse(input).expect("Parse input as module");
+    let name = ast.ident.clone();
+
+    let mut exclude : Vec<RouteInfo> = Vec::new();
+
+    match ast.expr.as_ref() {
+        syn::Expr::Block(expr) => {
+            for stmt in &expr.block.stmts {
+                if let syn::Stmt::Item(syn::Item::Fn(item_fn)) = stmt {
+                    // Append all attributes of the function to `exclude`
+                    exclude.push(RouteInfo { 
+                        fun : item_fn.clone(), 
+                        attributes : item_fn.attrs.clone() });
+                } else {
+                }
+            }
+        },
+        _ => panic!("Scope should contain only code block"),
+    };
+    
+    let path: syn::LitStr = syn::parse(args)
+        .expect("Expected the attribute argument to be a single string literal!");
+
+    let name_of_const : String = name.to_string();
+    let scope_path = format!("\"{}\"", path.value());
+    let mut expanded = quote! { const _ : &str = #name_of_const; const _ : &str = #scope_path; };
+
+    for RouteInfo { fun, attributes } in &exclude {
+        for attr in attributes {
+            if attr.path().segments[0].ident.to_string() == "actix_web" && attr.path().segments[1].ident.to_string() == "get" {
+                let mut cloned_fun = fun.clone();
+                cloned_fun.attrs.clear();
+
+                match ScopedRoute::new(name.clone(), attr.parse_args().expect("type conversion argument problem"), cloned_fun, Some(MethodType::Get), path.value()) {
+                    Ok(route) => {
+                        let tokens = route.into_token_stream();
+                        expanded.extend(tokens);
+                    },            // on macro related error, make IDEs happy; see fn docs
+                    Err(err) => {
+                        //let inner_attrib_argument = format!("\"{}\"", args.value().to_string());
+                        //expanded.extend(quote! { const _ : &str = #inner_attrib_argument; });
+                        let inner_name1 : String = format!("\"{:?}\"", attr.path().segments[0].ident.to_string());
+                        expanded.extend(quote! { const _ : &str = #inner_name1; });
+                        let inner_name2 : String = format!("\"{:?}\"", attr.path().segments[1].ident.to_string());
+                        expanded.extend(quote! { const _ : &str = #inner_name2; });                
+//                            input_and_compile_error(input.clone(), err);
+                        ()
+                    },
+                    }
+                }
+            } 
+        }
+/*
+        if let Ok(args)  = attr.parse_args::<syn::LitStr>() {
+            let inner_attrib_argument = format!("\"{}\"", args.value().to_string());
+            expanded.extend(quote! { const _ : &str = #inner_attrib_argument; });
+            let inner_name1 : String = format!("\"{:?}\"", attr.path().segments[0].ident.to_string());
+            expanded.extend(quote! { const _ : &str = #inner_name1; });
+            let inner_name2 : String = format!("\"{:?}\"", attr.path().segments[1].ident.to_string());
+            expanded.extend(quote! { const _ : &str = #inner_name2; });
+        };
+    };
+*/
+    expanded.into()
+}
+
+/*    
+        match ScopedRoute::new(route_args, route_info.fun.clone(), Some(MethodType::Get), "test".to_owned()) {
+            Ok(route) => {
+                let tokens = route.into_token_stream();
+                expanded.extend(tokens);
+            },            // on macro related error, make IDEs happy; see fn docs
+            Err(err) => {
+                input_and_compile_error(input.clone(), err);
+                ()
+            },
+        }
+    }
+
+    expanded.into()
+*/
+    //ast.into_token_stream().into()
+// https://docs.rs/syn/latest/syn/struct.Attribute.html
+
+struct RouteInfo {
+    fun: syn::ItemFn,
+    attributes: Vec<syn::Attribute>,
+}
+
+pub struct ScopedRoute {
+    /// Name of the handler function being annotated.
+    name: syn::Ident,
+
+    method_name: syn::Ident,
+
+    /// Args passed to routing macro.
+    ///
+    /// When using `#[routes]`, this will contain args for each specific routing macro.
+    args: Vec<Args>,
+
+    /// AST of the handler function being annotated.
+    ast: syn::ItemFn,
+
+    /// The doc comment attributes to copy to generated struct, if any.
+    doc_attributes: Vec<syn::Attribute>,
+
+    scope : String,
+}
+
+impl ScopedRoute {
+    pub fn new(name : Ident, args: RouteArgs, ast: syn::ItemFn, method: Option<MethodType>, scope: String) -> syn::Result<Self> {
+        let method_name = ast.sig.ident.clone();
+
+        // Try and pull out the doc comments so that we can reapply them to the generated struct.
+        // Note that multi line doc comments are converted to multiple doc attributes.
+        let doc_attributes = ast
+            .attrs
+            .iter()
+            .filter(|attr| attr.path().is_ident("doc"))
+            .cloned()
+            .collect();
+
+        let args = Args::new(args, method)?;
+
+        if args.methods.is_empty() {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "The #[route(..)] macro requires at least one `method` attribute",
+            ));
+        }
+
+        if matches!(ast.sig.output, syn::ReturnType::Default) {
+            return Err(syn::Error::new_spanned(
+                ast,
+                "Function has no return type. Cannot be used as handler",
+            ));
+        }
+
+        Ok(Self {
+            name,
+            method_name,
+            args: vec![args],
+            ast,
+            doc_attributes,
+            scope,
+        })
+    }
+}
+
+impl ToTokens for ScopedRoute {
+    fn to_tokens(&self, output: &mut TokenStream2) {
+        let Self {
+            name,
+            method_name,
+            ast,
+            args,
+            doc_attributes,
+            scope,
+        } = self;
+
+        // Convert the scope string into a TokenStream2 for interpolation
+        let scope_literal = syn::LitStr::new(&scope, Span::call_site());
+
+        let registrations: TokenStream2 = args
+            .iter()
+            .map(|args| {
+                let Args {
+                    path,
+                    resource_name,
+                    guards,
+                    wrappers,
+                    methods,
+                } = args;
+
+                let resource_name = resource_name
+                    .as_ref()
+                    .map_or_else(|| name.to_string(), LitStr::value);
+
+                let method_guards = {
+                    debug_assert!(!methods.is_empty(), "Args::methods should not be empty");
+
+                    let mut others = methods.iter();
+                    let first = others.next().unwrap();
+
+                    if methods.len() > 1 {
+                        let other_method_guards = others
+                            .map(|method_ext| method_ext.to_tokens_multi_guard_or_chain())
+                            .collect();
+
+                        first.to_tokens_multi_guard(other_method_guards)
+                    } else {
+                        first.to_tokens_single_guard()
+                    }
+                };
+
+                quote! {
+                    let __resource = ::actix_web::Resource::new(#path)
+                        .name(#resource_name)
+                        #method_guards
+                        #(.guard(::actix_web::guard::fn_guard(#guards)))*
+                        #(.wrap(#wrappers))*
+                        .to(#method_name);
+
+                    let __scope = ::actix_web::web::scope(#scope_literal).service(__resource);
+
+                    ::actix_web::dev::HttpServiceFactory::register(__scope, __config);
+                }
+            })
+            .collect();
+ 
+        let stream = quote! {
+            #(#doc_attributes)*
+            #[allow(non_camel_case_types, missing_docs)]
+            pub struct #name;
+
+            impl ::actix_web::dev::HttpServiceFactory for #name {
+                fn register(self, __config: &mut actix_web::dev::AppService) {
+                    #ast
+                    #registrations
+                }
+            }
+        };
+
+        output.extend(stream);
+    }
+}
