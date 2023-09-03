@@ -71,9 +71,9 @@ actix-service = "2"
 actix-utils = "3"
 actix-tls = { version = "3", default-features = false, optional = true }
 
-actix-http = { version = "3.3", features = ["ws"] }
+actix-http = { path = "../actix-http", features = ["ws"] }
 actix-router = "0.5"
-actix-web-codegen = { version = "4.2", optional = true }
+actix-web-codegen = { path = "../actix-web-codegen", optional = true }
 
 ahash = "0.8"
 bytes = "1"
