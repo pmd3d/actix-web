@@ -555,46 +555,83 @@ fn input_and_compile_error(mut item: TokenStream, err: syn::Error) -> TokenStrea
     item
 }
 
-pub(crate) fn handle_scope(args: TokenStream, input: TokenStream) -> TokenStream  {
+fn remove_matching_attribute(attrs: Vec<syn::Attribute>) -> Vec<syn::Attribute> {
+    attrs.into_iter().filter(|attr| {
+        !(attr.path().segments[0].ident.to_string() == "actix_web" && attr.path().segments[1].ident.to_string() == "get")
+    }).collect()
+}
+
+pub fn handle_scope(args: TokenStream, input: TokenStream) -> TokenStream  {
     if args.is_empty() {
         panic!("invalid server definition, expected: #[scope(\"some path\")]");
     }
 
     let ast: syn::ItemConst = syn::parse(input.clone()).expect("Parse input as a const variable");
+
     //TODO: we should change it to mod once supported on stable
     //let ast: syn::ItemMod = syn::parse(input).expect("Parse input as module");
     let name = ast.ident.clone();
 
+    let mut ast: syn::ItemConst = syn::parse(input.clone()).expect("Parse input as a const variable");
+
     let mut exclude : Vec<RouteInfo> = Vec::new();
+    let mut new_statements: Vec<syn::Stmt> = Vec::new();
 
     match ast.expr.as_ref() {
         syn::Expr::Block(expr) => {
             for stmt in &expr.block.stmts {
                 if let syn::Stmt::Item(syn::Item::Fn(item_fn)) = stmt {
-                    // Append all attributes of the function to `exclude`
-                    exclude.push(RouteInfo { 
-                        fun : item_fn.clone(), 
-                        attributes : item_fn.attrs.clone() });
-                } else {
+                    let mut new_fn = item_fn.clone();
+                      let mut found = false;
+
+                    // Check and collect attributes
+                    for attr in &item_fn.attrs {
+                        if attr.path().segments[0].ident.to_string() == "actix_web" && attr.path().segments[1].ident.to_string() == "get" {
+                            exclude.push(RouteInfo {
+                                fun: item_fn.clone(),
+                                attributes: item_fn.attrs.clone(),
+                            });
+                            found = true;
+                        }
+                    }
+
+                    if !found {
+                        new_statements.push(stmt.clone());
+                    }
+                }
+                else {
+                    new_statements.push(stmt.clone());
                 }
             }
         },
         _ => panic!("Scope should contain only code block"),
     };
-    
+
+    if let syn::Expr::Block(expr) = &mut *ast.expr {
+        expr.block.stmts = new_statements.clone();
+    }
+
     let path: syn::LitStr = syn::parse(args)
         .expect("Expected the attribute argument to be a single string literal!");
 
     let name_of_const : String = name.to_string();
     let scope_path = format!("\"{}\"", path.value());
-    let mut expanded = quote! { const _ : &str = #name_of_const; const _ : &str = #scope_path; };
+
+    let module_name = format!("{}_scope", name); 
+    let module_name = syn::Ident::new(&module_name, Span::call_site());
+
+    let prefix = match ast.expr.as_ref() {
+        syn::Expr::Block(expr) => quote!(pub mod #module_name #expr),
+        _ => panic!("Unexpect non-block ast in scope macro")
+    };
+    
+    let mut expanded= prefix;
 
     for RouteInfo { fun, attributes } in &exclude {
         for attr in attributes {
             if attr.path().segments[0].ident.to_string() == "actix_web" && attr.path().segments[1].ident.to_string() == "get" {
                 let mut cloned_fun = fun.clone();
-                cloned_fun.attrs.clear();
-
+                cloned_fun.attrs = remove_matching_attribute(cloned_fun.attrs);
                 match ScopedRoute::new(name.clone(), attr.parse_args().expect("type conversion argument problem"), cloned_fun, Some(MethodType::Get), path.value()) {
                     Ok(route) => {
                         let tokens = route.into_token_stream();
@@ -610,21 +647,14 @@ pub(crate) fn handle_scope(args: TokenStream, input: TokenStream) -> TokenStream
 //                            input_and_compile_error(input.clone(), err);
                         ()
                     },
-                    }
                 }
+            }
             } 
         }
-/*
-        if let Ok(args)  = attr.parse_args::<syn::LitStr>() {
-            let inner_attrib_argument = format!("\"{}\"", args.value().to_string());
-            expanded.extend(quote! { const _ : &str = #inner_attrib_argument; });
-            let inner_name1 : String = format!("\"{:?}\"", attr.path().segments[0].ident.to_string());
-            expanded.extend(quote! { const _ : &str = #inner_name1; });
-            let inner_name2 : String = format!("\"{:?}\"", attr.path().segments[1].ident.to_string());
-            expanded.extend(quote! { const _ : &str = #inner_name2; });
-        };
-    };
-*/
+
+//    let inner : String = format!("{:?}", new_statements.clone());
+//    expanded = quote! { const _ : &str = #inner; };
+
     expanded.into()
 }
 
