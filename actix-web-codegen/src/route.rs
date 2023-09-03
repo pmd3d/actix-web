@@ -652,7 +652,7 @@ pub fn handle_scope(args: TokenStream, input: TokenStream) -> TokenStream  {
             } 
         }
 
-//    let inner : String = format!("{:?}", new_statements.clone());
+//    let inner : String = format!("{}", expanded.clone());
 //    expanded = quote! { const _ : &str = #inner; };
 
     expanded.into()
@@ -682,10 +682,9 @@ struct RouteInfo {
 }
 
 pub struct ScopedRoute {
-    /// Name of the handler function being annotated.
     name: syn::Ident,
-
     method_name: syn::Ident,
+    struct_name: syn::Ident,
 
     /// Args passed to routing macro.
     ///
@@ -704,6 +703,8 @@ pub struct ScopedRoute {
 impl ScopedRoute {
     pub fn new(name : Ident, args: RouteArgs, ast: syn::ItemFn, method: Option<MethodType>, scope: String) -> syn::Result<Self> {
         let method_name = ast.sig.ident.clone();
+        let struct_name_str = format!("inner_{}", method_name.to_string());
+        let struct_name = syn::Ident::new(&struct_name_str, method_name.span());
 
         // Try and pull out the doc comments so that we can reapply them to the generated struct.
         // Note that multi line doc comments are converted to multiple doc attributes.
@@ -733,6 +734,7 @@ impl ScopedRoute {
         Ok(Self {
             name,
             method_name,
+            struct_name, 
             args: vec![args],
             ast,
             doc_attributes,
@@ -746,6 +748,7 @@ impl ToTokens for ScopedRoute {
         let Self {
             name,
             method_name,
+            struct_name,
             ast,
             args,
             doc_attributes,
@@ -768,7 +771,7 @@ impl ToTokens for ScopedRoute {
 
                 let resource_name = resource_name
                     .as_ref()
-                    .map_or_else(|| name.to_string(), LitStr::value);
+                    .map_or_else(|| struct_name.to_string(), LitStr::value);
 
                 let method_guards = {
                     debug_assert!(!methods.is_empty(), "Args::methods should not be empty");
@@ -805,9 +808,9 @@ impl ToTokens for ScopedRoute {
         let stream = quote! {
             #(#doc_attributes)*
             #[allow(non_camel_case_types, missing_docs)]
-            pub struct #name;
+            pub struct #struct_name;
 
-            impl ::actix_web::dev::HttpServiceFactory for #name {
+            impl ::actix_web::dev::HttpServiceFactory for #struct_name {
                 fn register(self, __config: &mut actix_web::dev::AppService) {
                     #ast
                     #registrations
